@@ -5,6 +5,8 @@
 #include <GLFW/glfw3.h>
 #include <vector>
 #include "planet.h"
+#include "ship.h"
+#include "arrow.h"
 #include "camera.h"
 
 class Universe
@@ -19,6 +21,8 @@ public:
   glm::mat4 projection;
   glm::mat4 view;
   std::vector<Planet> planets;
+  Ship* playerShip;
+  Arrow* myArrow;
   Camera mainCamera;
 
   void Init();

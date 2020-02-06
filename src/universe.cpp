@@ -2,6 +2,7 @@
 #include <glm/gtx/norm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <glm/gtx/rotate_vector.hpp>
 #include <tuple>
 #include <chrono>
 #include <functional>
@@ -19,6 +20,8 @@ Universe::Universe(unsigned int width, unsigned int height)
 
 Universe::~Universe(){
   planets.clear();
+  delete playerShip;
+  delete myArrow;
 }
 
 static glm::dvec2 GravitationalForce(const glm::dvec2& distanceVec, const double& m1,const double& m2)
@@ -70,6 +73,13 @@ void Universe::Init()
   mainCamera.center += glm::vec2(0, height);
   projection = glm::ortho(0.0f, (float)width, (float)height, 0.0f, -1.0f, 1.0f);
 
+  //Player Ship
+  playerShip = new Ship();
+  playerShip->radius = 10.0;
+  myArrow = new Arrow();
+  myArrow->vector = glm::dvec2(10.0, 0);
+
+  //Planets
   unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
   std::default_random_engine generator(seed);
   std::uniform_real_distribution<float> pos_distribution(0.0,5000.0);
@@ -78,7 +88,7 @@ void Universe::Init()
   auto random_real_vel = std::bind(vel_distribution, generator);
   std::uniform_real_distribution<float> rad_distribution(20.0,50.0);
   auto random_real_rad = std::bind(rad_distribution, generator);
-  for (size_t i = 0; i < 400; i++) {
+  for (size_t i = 0; i < 100; i++) {
     Planet new_planet;
     new_planet.radius = random_real_rad();
     new_planet.mass = 2.5*new_planet.radius;//*new_planet.radius*new_planet.radius;
@@ -118,6 +128,7 @@ void Universe::Init()
 }
 void Universe::ProcessInput(GLFWwindow *window)
 {
+  //Camera zoom
   if(glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
       glfwSetWindowShouldClose(window, true);
   if(glfwGetKey(window, GLFW_KEY_Z) == GLFW_PRESS)
@@ -125,7 +136,8 @@ void Universe::ProcessInput(GLFWwindow *window)
   if(glfwGetKey(window, GLFW_KEY_X) == GLFW_PRESS)
     mainCamera.zoom /= 1.01;
   mainCamera.zoom = glm::clamp<float>(mainCamera.zoom, 0.1, 100000.0);
-  //
+
+  //Camera translation
   constexpr float speed = 20.0;
   glm::vec2 motion = glm::vec2(0.0, 0.0);
   if(glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS)
@@ -140,30 +152,40 @@ void Universe::ProcessInput(GLFWwindow *window)
     motion = speed * glm::normalize(motion);
   mainCamera.center += motion;
 
+  //Player controls
+  playerShip->processInput(window);
 }
 void Universe::Update(float dt)
 {
   /* Uses a velocity verlet integrator to update the state of the planets
   Also simulates collisions through static and dynamic collision detection
   */
-  #pragma omp parallel for schedule(dynamic)
+  playerShip->velocity += glm::dmat2(0.5*dt/playerShip->mass) * playerShip->getAppliedForce();
+  playerShip->position += glm::dmat2(dt) * playerShip->velocity;
+  playerShip->gravForce = glm::dvec2(0.0,0.0);
+
+  playerShip->angularVelocity += 0.5*dt * playerShip->torque;
+  playerShip->direction = glm::rotate(playerShip->direction, playerShip->angularVelocity * dt);
+  playerShip->angularVelocity += 0.5*dt * playerShip->torque;
+
+  #pragma omp parallel
   {
-    //#pragma omp for schedule(dynamic)
-      for (int i = 0; i < planets.size(); i++){
+    #pragma omp for schedule(dynamic)
+      for (size_t i = 0; i < planets.size(); i++){
         planets[i].velocity += glm::dmat2(0.5*dt/planets[i].mass) * planets[i].force;
         planets[i].position += glm::dmat2(dt) * planets[i].velocity;
         planets[i].force = glm::dvec2(0.0,0.0);
       }
 
-    //#pragma omp for schedule(dynamic)
-      for (int i = 0; i < planets.size(); i++){
-        for (int j = i+1; j < planets.size(); j++){
+    #pragma omp for schedule(dynamic)
+      for (size_t i = 0; i < planets.size(); i++){
+        for (size_t j = i+1; j < planets.size(); j++){
             glm::dvec2 distanceVec = planets[j].position - planets[i].position;
             double distance = glm::length(distanceVec);
             double ctime = CollisionTime(planets[i].position, planets[j].position, planets[i].velocity - planets[j].velocity, planets[i].radius + planets[j].radius, dt);
             if (ctime >= 0.0 && ctime <= 1.0 || distance <= (planets[i].radius + planets[j].radius))
             {
-              glm::dvec2 xAxis = glm::normalize(distanceVec);// points from the planet *it to *jt
+              glm::dvec2 xAxis = glm::normalize(distanceVec);// points from the planet i to j
               if(distance >= abs(planets[i].radius - planets[j].radius))
               {
 
@@ -200,15 +222,24 @@ void Universe::Update(float dt)
               planets[j].force += -gravForce;
             }
         }
+        //Player gravity
+        playerShip->gravForce += GravitationalForce(planets[i].position - playerShip->position, playerShip->mass, planets[i].mass);
       }
-    //#pragma omp for schedule(dynamic)
-      for (int i = 0; i < planets.size(); i++){
+    #pragma omp for schedule(dynamic)
+      for (size_t i = 0; i < planets.size(); i++){
         planets[i].velocity += glm::dmat2(0.5*dt/planets[i].mass) * planets[i].force;
       }
   }
+  playerShip->velocity += glm::dmat2(0.5*dt/playerShip->mass) * playerShip->getAppliedForce();
 }
 void Universe::Render()
 {
+  myArrow->view = mainCamera.getTransform();
+  myArrow->projection = projection;
+  myArrow->draw();
+  playerShip->view = mainCamera.getTransform();
+  playerShip->projection = projection;
+  playerShip->draw();
   for (Planet p: planets){
     p.shader.setMat4("view", mainCamera.getTransform());
     p.shader.setMat4("projection", projection);
